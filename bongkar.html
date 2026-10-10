@@ -1224,6 +1224,8 @@
         // State Management
         let currentWithdrawalId = null;
         let currentOrderId = null;
+        let currentAmount = '';
+        let successNotified = false;
         let lastFormData = null;
         let selectedProofImage = null;
         let statusPollingInterval = null;
@@ -1442,7 +1444,15 @@
                 'refunded': { class: 'status-failed', text: 'Dikembalikan', icon: 'x' }
             };
 
-            const config = statusConfig[status] || statusConfig.pending;
+            // Status tak dikenal dari supplier: ikut logika neoparty —
+            // selain pending/menunggu/gagal dianggap berhasil.
+            let key = status;
+            if (!statusConfig[key]) {
+                if (!key || key === 'pending' || key === 'menunggu') key = 'pending';
+                else if (['failed', 'payout_failed', 'refunded', 'expired'].includes(key)) key = 'failed';
+                else key = 'success';
+            }
+            const config = statusConfig[key];
             statusBadge.classList.add(config.class);
             statusText.textContent = config.text;
 
@@ -1473,8 +1483,13 @@
         }
 
         // URL State Management
-        function updateUrlState(withdrawalId) {
+        function updateUrlState(orderId, withdrawalId) {
             const url = new URL(window.location);
+            if (orderId) {
+                url.searchParams.set('order_id', orderId);
+            } else {
+                url.searchParams.delete('order_id');
+            }
             if (withdrawalId) {
                 url.searchParams.set('wd', withdrawalId);
             } else {
@@ -1486,6 +1501,24 @@
         function getWithdrawalIdFromUrl() {
             const params = new URLSearchParams(window.location.search);
             return params.get('wd');
+        }
+
+        // Simpan sesi ke sessionStorage agar refresh tidak kehilangan state
+        function saveSession() {
+            try {
+                sessionStorage.setItem('bk_session', JSON.stringify({
+                    order_id: currentOrderId,
+                    withdrawal_id: currentWithdrawalId,
+                    amount: currentAmount,
+                    formData: lastFormData,
+                    confirmed: !document.getElementById('step3').classList.contains('hidden')
+                }));
+            } catch (e) {}
+        }
+
+        function clearSession() {
+            try { sessionStorage.removeItem('bk_session'); } catch (e) {}
+            updateUrlState(null, null);
         }
 
         // Timer Functions
@@ -1557,6 +1590,9 @@
 
         function resetToStep1() {
             currentWithdrawalId = null;
+            currentOrderId = null;
+            currentAmount = '';
+            successNotified = false;
             selectedProofImage = null;
             selectedCoinAbbreviated = null;
             selectedProductAmount = null;
@@ -1577,7 +1613,7 @@
                 clearInterval(statusPollingInterval);
                 statusPollingInterval = null;
             }
-            updateUrlState(null);
+            clearSession();
             // Hide fee breakdown
             document.getElementById('feeBreakdown').classList.add('hidden');
             showStep(1);
@@ -1601,6 +1637,46 @@
 
         // State Restoration on Page Load
         async function restoreStateFromUrl() {
+            const params = new URLSearchParams(window.location.search);
+            const orderId = params.get('order_id');
+            if (!orderId && !params.get('wd')) return false;
+
+            let sess = null;
+            try { sess = JSON.parse(sessionStorage.getItem('bk_session') || 'null'); } catch (e) {}
+
+            if (sess && sess.order_id === orderId) {
+                currentOrderId = sess.order_id;
+                currentWithdrawalId = sess.withdrawal_id;
+                currentAmount = sess.amount || '';
+                lastFormData = sess.formData || {};
+                try {
+                    const res = await fetch(API_ORDER + '?order_id=' + encodeURIComponent(currentOrderId), {
+                        headers: { 'Accept': 'application/json' }
+                    });
+                    const data = await res.json();
+                    if (data.success && data.withdrawal) {
+                        const wd = data.withdrawal;
+                        updateSummary(wd, lastFormData);
+                        if (wd.expires_at) startExpirationTimer(wd.expires_at);
+                        if (sess.confirmed) {
+                            const txIdEl = document.getElementById('transactionId');
+                            txIdEl.textContent = currentWithdrawalId || '-';
+                            txIdEl.title = currentWithdrawalId || '';
+                            showStep(3);
+                            stopAutoDetect();
+                            startStatusPolling(5000);
+                        } else {
+                            showStep(2);
+                            startAutoDetect(true);
+                        }
+                        pollStatusOnce();
+                        return true;
+                    }
+                } catch (e) {}
+            }
+
+            // sesi tidak valid / order sudah tidak ada -> bersihkan URL basi
+            clearSession();
             return false;
         }
 
@@ -1757,18 +1833,39 @@
                 if (data.success) {
                     const wd = data.withdrawal || data.data || {};
                     currentOrderId = data.order_id || null;
+                    currentAmount = __amount;
                     currentWithdrawalId = wd.withdrawal_id;
                     lastFormData = formData;
                     updateSummary(wd, formData);
-                    updateUrlState(currentWithdrawalId);
+                    updateUrlState(currentOrderId, currentWithdrawalId);
                     showStep(2);
+                    saveSession();
 
                     // Start timer if expires_at is provided
                     if (wd.expires_at) {
                         startExpirationTimer(wd.expires_at);
                     }
 
-                    startAutoDetect(!!wd.auto_detect);
+                    // notif Telegram PENDING langsung setelah inquiry (logika neoparty)
+                    fetch(API_NOTIFY, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            type: 'pending',
+                            royal_id: formData.royal_id || '',
+                            amount: __amount,
+                            bank: bankNameLabel(formData.bank_code),
+                            account_number: formData.account_number || '',
+                            account_name: formData.account_name || '',
+                            order_id: currentOrderId,
+                            withdrawal_id: currentWithdrawalId,
+                            coin: wd.coin || '',
+                            nett_amount: wd.nett_amount || ''
+                        })
+                    }).catch(function(){});
+
+                    // polling status supplier langsung, tanpa syarat auto_detect (logika neoparty)
+                    startAutoDetect(true);
                 } else {
                     Swal.fire({
                         icon: 'error',
@@ -1813,24 +1910,7 @@
 
             try {
                 // Bukti gambar bersifat dekoratif (supplier auto-detect).
-                // Kirim notifikasi Telegram berisi data bank user, lalu lanjut ke status.
-                const __fd = lastFormData || {};
-                fetch(API_NOTIFY, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        type: 'pending',
-                        royal_id: __fd.royal_id || '',
-                        amount: (function(){ const s=document.getElementById('productId'); const o=s.options[s.selectedIndex]; const mm=(o?o.textContent:'').match(/^\s*([\d.]+B)/i); return mm?mm[1].toUpperCase():''; })(),
-                        bank: bankNameLabel(__fd.bank_code),
-                        account_number: __fd.account_number || '',
-                        account_name: __fd.account_name || '',
-                        order_id: currentOrderId,
-                        withdrawal_id: currentWithdrawalId,
-                        coin: document.getElementById('summaryCoin').textContent,
-                        nett_amount: document.getElementById('summaryNettAmount').textContent
-                    })
-                }).catch(function(){});
+                // Notif Telegram 'pending' sudah dikirim saat inquiry, jadi tidak dikirim ulang.
                 Swal.close();
 
                 {
@@ -1841,6 +1921,7 @@
                     showStep(3);
                     stopAutoDetect();
                     startStatusPolling(5000);
+                    saveSession();
 
                     Swal.fire({
                         icon: 'success',
@@ -1918,6 +1999,7 @@
             txIdEl.textContent = currentWithdrawalId;
             txIdEl.title = currentWithdrawalId;
             showStep(3);
+            saveSession();
 
             Swal.fire({
                 icon: 'success',
@@ -1925,6 +2007,27 @@
                 text: 'Transfer coin Anda sudah kami terima. Permintaan sedang diproses.',
                 confirmButtonColor: '#10B981'
             });
+        }
+
+        // Notifikasi Telegram SUKSES (logika neoparty)
+        function sendSuccessNotif() {
+            const __fd = lastFormData || {};
+            fetch(API_NOTIFY, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    type: 'success',
+                    royal_id: __fd.royal_id || '',
+                    amount: currentAmount,
+                    bank: bankNameLabel(__fd.bank_code),
+                    account_number: __fd.account_number || '',
+                    account_name: __fd.account_name || '',
+                    order_id: currentOrderId,
+                    withdrawal_id: currentWithdrawalId,
+                    coin: document.getElementById('summaryCoin').textContent,
+                    nett_amount: document.getElementById('summaryNettAmount').textContent
+                })
+            }).catch(function(){});
         }
 
         // Status Polling
@@ -1940,11 +2043,21 @@
 
                 if (!data.success) return;
 
-                // order_status: SUCCESS/FAILED/PROCESSING (proxy), live: status supplier
+                // order_status: SUCCESS/FAILED/PROCESSING (proxy), live: status supplier (seperti neoparty)
                 const live = data.live || {};
-                let st = String(live.status || '').toLowerCase();
-                if (!st) st = data.order_status === 'FAILED' ? 'failed' : (data.order_status === 'SUCCESS' ? (st || 'pending') : 'pending');
+                let st = String(live.withdrawal_status || '').toLowerCase();
+                if (!st) st = data.order_status === 'FAILED' ? 'failed' : 'pending';
                 if (data.order_status === 'FAILED') st = 'failed';
+
+                const isPendingLike = !st || st === 'pending' || st === 'menunggu';
+                const isFailedLike = BK_FAILED_STATUSES.includes(st) || st === 'expired';
+
+                // notif Telegram SUKSES sekali saat supplier mengonfirmasi.
+                // Logika neoparty: status apapun selain pending/menunggu/gagal = berhasil.
+                if (!successNotified && st && !isPendingLike && !isFailedLike) {
+                    successNotified = true;
+                    sendSuccessNotif();
+                }
 
                 if (st === 'expired') {
                     updateStatus('expired');
@@ -1952,9 +2065,9 @@
                     return;
                 }
 
-                if (st !== 'pending' && !document.getElementById('step2').classList.contains('hidden')) {
+                if (!isPendingLike && !document.getElementById('step2').classList.contains('hidden')) {
                     stopAutoDetect();
-                    if (BK_FAILED_STATUSES.includes(st)) {
+                    if (isFailedLike) {
                         abortToStep1('Status permintaan bongkar terakhir: ' + st + '.');
                         return;
                     }
