@@ -1764,11 +1764,11 @@
                     showStep(2);
 
                     // Start timer if expires_at is provided
-                    if (data.data.expires_at) {
-                        startExpirationTimer(data.data.expires_at);
+                    if (wd.expires_at) {
+                        startExpirationTimer(wd.expires_at);
                     }
 
-                    startAutoDetect(!!data.data.auto_detect);
+                    startAutoDetect(!!wd.auto_detect);
                 } else {
                     Swal.fire({
                         icon: 'error',
