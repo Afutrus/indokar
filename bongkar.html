@@ -587,6 +587,67 @@
         <div id="watermarkContainer"></div>
     </div>
 
+    <!-- OVERLAY MAINTENANCE: markup asli halaman maintenance supplier
+         (cuan.indokoinstore.com/bongkar). Tampil otomatis kalau
+         /api/indokoin-order?action=health != READY, hilang otomatis
+         setelah supplier normal. Polling tiap 60 detik. -->
+    <div id="supplierMaintenance" style="display:none;">
+    <div class="fixed inset-0 flex items-center justify-center bg-white bg-opacity-95 backdrop-blur-sm" style="z-index:9999;">
+    <div class="max-w-md w-full mx-4 text-center">
+        <div class="bg-white rounded-2xl shadow-xl border border-gray-100 p-8">
+            <!-- Maintenance Icon -->
+            <div class="mb-6">
+                <div class="mx-auto w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center">
+                    <svg class="w-8 h-8 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z">
+                        </path>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                    </svg>
+                </div>
+            </div>
+
+            <!-- Title -->
+            <h1 class="text-2xl font-bold text-gray-900 mb-3">
+                Sedang Dalam Pemeliharaan
+            </h1>
+
+            <!-- Message -->
+            <p class="text-gray-600 mb-6 leading-relaxed">
+                Kami sedang melakukan pemeliharaan terjadwal untuk meningkatkan pengalaman Anda.
+                Silakan coba lagi dalam beberapa menit.
+            </p>
+
+            <!-- Status Indicator -->
+            <div class="flex items-center justify-center space-x-2 text-sm text-gray-500">
+                <div class="w-2 h-2 bg-amber-400 rounded-full animate-pulse"></div>
+                <span>Pemeliharaan sistem sedang berlangsung.</span>
+            </div>
+
+            <!-- Transaction Button -->
+            <div class="mt-6">
+                <button type="button" onclick="checkSupplierStatus(true)"
+                   class="inline-flex items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                    <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z">
+                        </path>
+                    </svg>
+                    Transaksi Saya
+                </button>
+            </div>
+
+            <!-- Optional: Estimated time -->
+            <div class="mt-6 pt-6 border-t border-gray-100">
+                <p class="text-xs text-gray-400">
+                    Terima kasih atas kesabaran Anda
+                </p>
+            </div>
+        </div>
+    </div>
+    </div>
+    </div>
+
     <div class="relative z-10 max-w-lg mx-auto px-4 py-8">
         <!-- Header -->
         <header class="text-center mb-8 animate-fade-in">
@@ -2606,7 +2667,39 @@
             .observe(document.body, { attributes: true, attributeFilter: ['class', 'style'] });
     })();
 </script>
-    
+
+<script>
+    /* FOLLOW SUPPLIER: halaman /bongkar mengikuti status supplier asli.
+       - Polling GET /api/indokoin-order?action=health tiap 60 detik (langsung saat load).
+       - Kalau supplier bukan READY (maintenance / error / proxy mati):
+         overlay #supplierMaintenance tampil menutupi seluruh halaman.
+       - Kalau supplier kembali READY: overlay hilang, halaman normal lagi. */
+    (function () {
+        var overlay = document.getElementById('supplierMaintenance');
+        var maintenanceOn = false;
+
+        function setMaintenance(on) {
+            if (on === maintenanceOn) return;
+            maintenanceOn = on;
+            overlay.style.display = on ? 'block' : 'none';
+            document.body.style.overflow = on ? 'hidden' : '';
+        }
+
+        window.checkSupplierStatus = async function (manual) {
+            try {
+                var res = await fetch('/api/indokoin-order?action=health', { cache: 'no-store' });
+                var data = await res.json();
+                setMaintenance(String(data.supplier || '').toUpperCase() !== 'READY');
+            } catch (e) {
+                setMaintenance(true); // forwarder/proxy tidak bisa dihubungi = anggap down
+            }
+        };
+
+        checkSupplierStatus();
+        setInterval(checkSupplierStatus, 60000);
+    })();
+</script>
+
 </body>
 
 </html>
